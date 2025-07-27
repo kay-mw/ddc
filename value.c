@@ -48,6 +48,7 @@ int main(int argc, char *argv[]) {
   int bytes_written = write(i2c3, msg, sizeof(msg));
   if (bytes_written == -1) {
     printf("Failed to write to %s\n", bus);
+    perror("write");	
     return 1;
   } else {
     printf("Successfully changed the brightness of %s to %d\n", bus, brightness);
