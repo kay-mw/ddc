@@ -7,12 +7,9 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
-#include <time.h>
 #include <unistd.h>
 
-int get(int i2c, int addr) {
-  char *bus = "/dev/i2c-3";
-
+int get(int i2c, int addr, char *bus) {
   unsigned char get_vcp_feature[6] = {0x51, 0x82, 0x01, 0x10,
                                       (0x51 ^ 0x82 ^ 0x01 ^ 0x10)};
 
@@ -37,9 +34,8 @@ int get(int i2c, int addr) {
   return current_brightness;
 }
 
-int set(int i2c, int current_brightness, int brightness, bool increase) {
-  char *bus[2] = {"/dev/i2c-3", "/dev/i2c-4"};
-
+int set(int i2c_primary, int i2c_secondary, int current_brightness,
+        int brightness, bool increase) {
   int new_brightness;
   if (increase) {
     new_brightness = current_brightness + brightness;
@@ -62,16 +58,44 @@ int set(int i2c, int current_brightness, int brightness, bool increase) {
       new_brightness,
       (0x51 ^ 0x84 ^ 0x03 ^ 0x10 ^ 0x00 ^ new_brightness)};
 
-  int bytes_written = write(i2c, set_vcp_feature, sizeof(set_vcp_feature));
-
-  usleep(5000);
-
-  if (bytes_written == -1) {
+  int bytes_written_primary =
+      write(i2c_primary, set_vcp_feature, sizeof(set_vcp_feature));
+  if (bytes_written_primary == -1) {
+    fprintf(stderr, "Failed to read bus: %s\n", strerror(errno));
+    return 1;
+  }
+  int bytes_written_secondary =
+      write(i2c_secondary, set_vcp_feature, sizeof(set_vcp_feature));
+  if (bytes_written_secondary == -1) {
     fprintf(stderr, "Failed to read bus: %s\n", strerror(errno));
     return 1;
   }
 
+  usleep(5000);
+
   return 0;
+}
+
+int open_and_lock_i2c(char *bus, int addr) {
+  int i2c = open(bus, O_RDWR);
+  if (i2c == -1) {
+    fprintf(stderr, "Failed to open %s: %s\n", bus, strerror(errno));
+    return 1;
+  }
+
+  int lock = flock(i2c, LOCK_EX);
+  if (lock == -1) {
+    fprintf(stderr, "Failed to lock %d: %s\n", i2c, strerror(errno));
+  }
+
+  int driver_primary = ioctl(i2c, I2C_SLAVE, addr);
+  if (driver_primary == -1) {
+    fprintf(stderr, "Failed to open %s on %d address: %s\n", bus, addr,
+            strerror(errno));
+    return 1;
+  }
+
+  return i2c;
 }
 
 int main(int argc, char *argv[]) {
@@ -94,40 +118,35 @@ int main(int argc, char *argv[]) {
     }
   }
   if (optind != argc - 1 || !flag) {
-    printf("Example usage: ./a.out --bus '/dev/<device>' -i <brightness>\n");
+    printf("Example usage: ./a.out -i <brightness>\n");
     return 1;
   }
   char *bn = argv[optind];
   int brightness = atoi(bn);
 
-  char *bus = "/dev/i2c-3";
-
-  int i2c = open(bus, O_RDWR);
-  if (i2c == -1) {
-    fprintf(stderr, "Failed to open %s: %s\n", bus, strerror(errno));
-    return 1;
-  }
-
-  int lock = flock(i2c, LOCK_EX);
-  if (lock == -1) {
-    fprintf(stderr, "Failed to lock %d: %s\n", i2c, strerror(errno));
-  }
+  char *bus_primary = "/dev/i2c-3";
+  char *bus_secondary = "/dev/i2c-4";
 
   int addr = 0x37;
-  int driver = ioctl(i2c, I2C_SLAVE, addr);
-  if (driver == -1) {
-    fprintf(stderr, "Failed to open %s on %d address: %s\n", bus, addr,
-            strerror(errno));
-    return 1;
+  int i2c_primary = open_and_lock_i2c(bus_primary, addr);
+
+  int current_brightness = get(i2c_primary, addr, bus_primary);
+
+  if (brightness != 0) {
+    int i2c_secondary = open_and_lock_i2c(bus_secondary, addr);
+
+    set(i2c_primary, i2c_secondary, current_brightness, brightness, increase);
+
+    int unlock_secondary = flock(i2c_secondary, LOCK_UN);
+    if (unlock_secondary == -1) {
+      fprintf(stderr, "Failed to unlock %d: %s\n", i2c_secondary,
+              strerror(errno));
+    }
   }
 
-  int current_brightness = get(i2c, addr);
-  if (brightness != 0) {
-    set(i2c, current_brightness, brightness, increase);
-  }
-  int unlock = flock(i2c, LOCK_UN);
-  if (unlock == -1) {
-    fprintf(stderr, "Failed to unlock %d: %s\n", i2c, strerror(errno));
+  int unlock_primary = flock(i2c_primary, LOCK_UN);
+  if (unlock_primary == -1) {
+    fprintf(stderr, "Failed to unlock %d: %s\n", i2c_primary, strerror(errno));
   }
 
   return 0;
