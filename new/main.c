@@ -9,7 +9,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-int get(int i2c, int addr, char *bus) {
+int get(int i2c, int addr, char *bus, int brightness) {
   unsigned char get_vcp_feature[6] = {0x51, 0x82, 0x01, 0x10,
                                       (0x51 ^ 0x82 ^ 0x01 ^ 0x10)};
 
@@ -29,7 +29,9 @@ int get(int i2c, int addr, char *bus) {
 
   int current_brightness = vcp_feature_reply[9];
 
-  printf("{\"brightness\": %d}", current_brightness);
+  if (brightness == 0) {
+    printf("{\"brightness\": %d}\n", current_brightness);
+  }
 
   return current_brightness;
 }
@@ -126,11 +128,11 @@ int main(int argc, char *argv[]) {
 
   char *bus_primary = "/dev/i2c-3";
   char *bus_secondary = "/dev/i2c-4";
-
   int addr = 0x37;
+
   int i2c_primary = open_and_lock_i2c(bus_primary, addr);
 
-  int current_brightness = get(i2c_primary, addr, bus_primary);
+  int current_brightness = get(i2c_primary, addr, bus_primary, brightness);
 
   if (brightness != 0) {
     int i2c_secondary = open_and_lock_i2c(bus_secondary, addr);
