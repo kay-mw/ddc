@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <i2c/smbus.h>
 #include <linux/i2c-dev.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -120,7 +121,7 @@ int main(int argc, char *argv[]) {
     }
   }
   if (optind != argc - 1 || !flag) {
-    printf("Example usage: ./a.out -i <brightness>\n");
+    printf("Example usage: ./a.out -i/d <brightness>\n");
     return 1;
   }
   char *bn = argv[optind];
@@ -144,11 +145,22 @@ int main(int argc, char *argv[]) {
       fprintf(stderr, "Failed to unlock %d: %s\n", i2c_secondary,
               strerror(errno));
     }
+
+    int close_secondary = close(i2c_secondary);
+    if (close_secondary == -1) {
+      fprintf(stderr, "Failed to close %d: %s\n", i2c_secondary,
+              strerror(errno));
+    }
   }
 
   int unlock_primary = flock(i2c_primary, LOCK_UN);
   if (unlock_primary == -1) {
     fprintf(stderr, "Failed to unlock %d: %s\n", i2c_primary, strerror(errno));
+  }
+
+  int close_primary = close(i2c_primary);
+  if (close_primary == -1) {
+    fprintf(stderr, "Failed to close %d: %s\n", i2c_primary, strerror(errno));
   }
 
   return 0;

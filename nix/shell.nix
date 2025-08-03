@@ -3,7 +3,7 @@
   { } }:
 
 pkgs.mkShell {
-  buildInputs = with pkgs; [ ];
+  buildInputs = with pkgs; [ i2c-tools ];
   shellHook = ''
     zsh
   '';
