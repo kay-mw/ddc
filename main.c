@@ -10,7 +10,50 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-int get(int i2c, int addr, char *bus, int brightness) {
+int get(int i2c, int addr, char *bus, int brightness, bool increase) {
+  char filename[] = "brightness.txt";
+  FILE *fptr;
+  fptr = fopen(filename, "r");
+  if (fptr != NULL) {
+    char data[4];
+    if (fgets(data, sizeof(data), fptr) != NULL) {
+      int current_brightness = atoi(data);
+      fclose(fptr);
+      if (brightness == 0) {
+        printf("{\"brightness\": %d}\n", current_brightness);
+        return current_brightness;
+      } else {
+        int new_brightness;
+        if (increase) {
+          new_brightness = current_brightness + brightness;
+          if (new_brightness > 100) {
+            new_brightness = 100;
+          }
+        } else {
+          new_brightness = current_brightness - brightness;
+          if (new_brightness < 0) {
+            new_brightness = 0;
+          }
+        }
+
+        char new_brightness_str[4];
+        snprintf(new_brightness_str, sizeof(new_brightness_str), "%d",
+                 new_brightness);
+        fptr = fopen(filename, "w");
+        if (fputs(new_brightness_str, fptr) > 0) {
+          fclose(fptr);
+        } else {
+          fprintf(stderr, "Failed to write to %s: %s\n", filename,
+                  strerror(errno));
+        }
+
+        return new_brightness;
+      }
+    } else {
+      fprintf(stderr, "Failed to read brightness: %s", strerror(errno));
+    }
+  }
+
   unsigned char get_vcp_feature[6] = {0x51, 0x82, 0x01, 0x10,
                                       (0x51 ^ 0x82 ^ 0x01 ^ 0x10)};
 
@@ -19,8 +62,8 @@ int get(int i2c, int addr, char *bus, int brightness) {
     fprintf(stderr, "Failed to write to %s: %s\n", bus, strerror(errno));
     return 1;
   }
-
   usleep(10000);
+
   unsigned char vcp_feature_reply[15] = {0};
   ssize_t bytes_read = read(i2c, vcp_feature_reply, sizeof(vcp_feature_reply));
   if (bytes_read == -1) {
@@ -29,37 +72,28 @@ int get(int i2c, int addr, char *bus, int brightness) {
   }
 
   int current_brightness = vcp_feature_reply[9];
+  char file_brightness[4];
+  snprintf(file_brightness, sizeof(file_brightness), "%d", current_brightness);
 
-  if (brightness == 0) {
-    printf("{\"brightness\": %d}\n", current_brightness);
+  fptr = fopen(filename, "w");
+  if (fputs(file_brightness, fptr) > 0) {
+    fclose(fptr);
+  } else {
+    fprintf(stderr, "Failed to write to %s: %s\n", filename, strerror(errno));
   }
 
   return current_brightness;
 }
 
-int set(int i2c_primary, int i2c_secondary, int current_brightness,
-        int brightness, bool increase) {
-  int new_brightness;
-  if (increase) {
-    new_brightness = current_brightness + brightness;
-    if (new_brightness > 100) {
-      new_brightness = 100;
-    }
-  } else {
-    new_brightness = current_brightness - brightness;
-    if (new_brightness < 0) {
-      new_brightness = 0;
-    }
-  }
-
+int set(int i2c_primary, int i2c_secondary, int current_brightness) {
   unsigned char set_vcp_feature[7] = {
       0x51,
       0x84,
       0x03,
       0x10,
       0x00,
-      new_brightness,
-      (0x51 ^ 0x84 ^ 0x03 ^ 0x10 ^ 0x00 ^ new_brightness)};
+      current_brightness,
+      (0x51 ^ 0x84 ^ 0x03 ^ 0x10 ^ 0x00 ^ current_brightness)};
 
   int bytes_written_primary =
       write(i2c_primary, set_vcp_feature, sizeof(set_vcp_feature));
@@ -133,12 +167,13 @@ int main(int argc, char *argv[]) {
 
   int i2c_primary = open_and_lock_i2c(bus_primary, addr);
 
-  int current_brightness = get(i2c_primary, addr, bus_primary, brightness);
+  int current_brightness =
+      get(i2c_primary, addr, bus_primary, brightness, increase);
 
   if (brightness != 0) {
     int i2c_secondary = open_and_lock_i2c(bus_secondary, addr);
 
-    set(i2c_primary, i2c_secondary, current_brightness, brightness, increase);
+    set(i2c_primary, i2c_secondary, current_brightness);
 
     int unlock_secondary = flock(i2c_secondary, LOCK_UN);
     if (unlock_secondary == -1) {
