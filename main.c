@@ -1,6 +1,5 @@
 #include <errno.h>
 #include <fcntl.h>
-#include <i2c/smbus.h>
 #include <linux/i2c-dev.h>
 #include <stdbool.h>
 #include <stdio.h>
