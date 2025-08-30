@@ -1,3 +1,10 @@
-bin/
-*.out
-*.txt
+*
+
+!.gitignore
+!build.zig
+!shell.nix
+!.envrc
+
+!src/
+!src/main.c
+!src/main.zig
