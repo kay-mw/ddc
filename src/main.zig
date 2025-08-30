@@ -25,9 +25,10 @@ fn get(i2c: i32, file_name: []const u8) !u8 {
 
             std.Thread.sleep(10 * std.time.ns_per_us);
 
+            // To understand magic numbers, see Page 19 of https://glenwing.github.io/docs/VESA-DDCCI-1.1.pdf
             var luminance_reply: [15]u8 = undefined;
             _ = try std.posix.read(i2c, &luminance_reply);
-            const current_brightness: u8 = luminance_reply[9]; // Page 19 of https://glenwing.github.io/docs/VESA-DDCCI-1.1.pdf
+            const current_brightness: u8 = luminance_reply[9];
 
             return current_brightness;
         }
@@ -131,10 +132,13 @@ pub fn main() !void {
     }
 
     const monitors: [2][]const u8 = .{ "/dev/i2c-3", "/dev/i2c-4" };
+    var handles: [2]std.Thread = undefined;
 
     i = 0;
     for (monitors) |monitor| {
-        _ = try run_protocol(monitor, get_only, increase, brightness, i);
+        handles[i] = try std.Thread.spawn(.{}, run_protocol, .{ monitor, get_only, increase, brightness, i });
         i += 1;
     }
+
+    for (handles) |handle| handle.join();
 }
