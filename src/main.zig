@@ -43,6 +43,62 @@ fn set(i2c: i32, new_brightness: u8) !void {
     std.Thread.sleep(5 * std.time.ns_per_us);
 }
 
+fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness: u8, i: u8) !void {
+    const addr: u8 = 0x37;
+
+    var new_brightness: u8 = 0;
+    var file_name: []const u8 = undefined;
+
+    const i2c: i32 = try std.posix.open(monitor, .{ .ACCMODE = .RDWR }, 0);
+    try std.posix.flock(i2c, std.posix.LOCK.EX);
+    _ = std.os.linux.ioctl(i2c, li2c.I2C_SLAVE, addr);
+
+    if (i == 0) {
+        file_name = "dev-i2c-3.txt";
+    } else {
+        file_name = "dev-i2c-4.txt";
+    }
+
+    const current_brightness: u8 = try get(i2c, file_name);
+    var potential_brightness: i16 = 0;
+
+    if (!get_only) {
+        if (increase) {
+            potential_brightness = current_brightness + brightness;
+            if (potential_brightness > 255) {
+                new_brightness = 100;
+            } else {
+                new_brightness = current_brightness + brightness;
+            }
+        } else {
+            potential_brightness = current_brightness - brightness;
+            if (potential_brightness < 0) {
+                new_brightness = 0;
+            } else {
+                new_brightness = current_brightness - brightness;
+            }
+        }
+
+        if (new_brightness != current_brightness) {
+            try set(i2c, new_brightness);
+        }
+    } else {
+        new_brightness = current_brightness;
+        if (i == 0) {
+            const outb = std.io.getStdOut().writer();
+            try outb.print("{{\"brightness\": {d}}}\n", .{new_brightness});
+        }
+    }
+
+    try std.posix.flock(i2c, std.posix.LOCK.UN);
+
+    const brightness_file = try std.fs.cwd().createFile(file_name, .{ .read = false });
+    defer brightness_file.close();
+    var buffer: [3]u8 = undefined;
+    const brightness_string = try std.fmt.bufPrint(&buffer, "{}", .{new_brightness});
+    try brightness_file.writeAll(brightness_string);
+}
+
 pub fn main() !void {
     var args = std.process.args();
     var i: u8 = 0;
@@ -64,62 +120,21 @@ pub fn main() !void {
             get_only = true;
         } else if (!args.skip() and !get_only) {
             brightness = try std.fmt.parseInt(u8, arg, 10);
+            if (brightness > 100 or brightness < 0) {
+                std.debug.print("Invalid brightness value {d}. Please provide a brightness value between 0 and 100\n", .{brightness});
+                return;
+            }
         } else {
             std.debug.print("Invalid argument. Valid uses are: ddc -i <brightness>, ddc -d <brightness>, ddc -g\n", .{});
+            return;
         }
     }
 
     const monitors: [2][]const u8 = .{ "/dev/i2c-3", "/dev/i2c-4" };
-    const addr: u8 = 0x37;
 
-    var new_brightness: u8 = 0;
-    var file_name: []const u8 = undefined;
     i = 0;
     for (monitors) |monitor| {
-        const i2c: i32 = try std.posix.open(monitor, .{ .ACCMODE = .RDWR }, 0);
-        try std.posix.flock(i2c, std.posix.LOCK.EX);
-        _ = std.os.linux.ioctl(i2c, li2c.I2C_SLAVE, addr);
-
-        if (i == 0) {
-            file_name = "dev-i2c-3.txt";
-        } else {
-            file_name = "dev-i2c-4.txt";
-        }
-
-        const current_brightness: u8 = try get(i2c, file_name);
-
-        if (!get_only) {
-            if (increase) {
-                new_brightness = current_brightness + brightness;
-            } else {
-                new_brightness = current_brightness - brightness;
-            }
-
-            if (new_brightness > 100) {
-                new_brightness = 100;
-            } else if (new_brightness < 0) {
-                new_brightness = 0;
-            }
-
-            if (new_brightness != current_brightness) {
-                try set(i2c, new_brightness);
-            }
-        } else {
-            new_brightness = current_brightness;
-            if (i == 0) {
-                const outb = std.io.getStdOut().writer();
-                try outb.print("{{\"brightness\": {d}}}\n", .{new_brightness});
-            }
-        }
-
-        try std.posix.flock(i2c, std.posix.LOCK.UN);
-
-        const brightness_file = try std.fs.cwd().createFile(file_name, .{ .read = false });
-        defer brightness_file.close();
-        var buffer: [3]u8 = undefined;
-        const brightness_string = try std.fmt.bufPrint(&buffer, "{}", .{new_brightness});
-        try brightness_file.writeAll(brightness_string);
-
+        _ = try run_protocol(monitor, get_only, increase, brightness, i);
         i += 1;
     }
 }
