@@ -107,7 +107,8 @@ pub fn main() !void {
         } else {
             new_brightness = current_brightness;
             if (i == 0) {
-                std.debug.print("{{\"brightness\": {d}}}\n", .{new_brightness});
+                const outb = std.io.getStdOut().writer();
+                try outb.print("{{\"brightness\": {d}}}\n", .{new_brightness});
             }
         }
 
