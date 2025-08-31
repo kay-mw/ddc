@@ -3,21 +3,22 @@ const li2c = @cImport({
     @cInclude("linux/i2c-dev.h");
 });
 
-fn get(i2c: i32, file_name: []const u8) !u8 {
-    if (std.fs.cwd().openFile(file_name, .{ .mode = .read_only })) |existing_file| {
+fn get(i2c: i32, file_path: []const u8) !u8 {
+    if (std.fs.cwd().openFile(file_path, .{ .mode = .read_only })) |existing_file| {
         defer existing_file.close();
 
         const allocator = std.heap.page_allocator;
 
         const file_size = (try existing_file.stat()).size;
-        const buffer = try allocator.alloc(u8, file_size);
-        try existing_file.reader().readNoEof(buffer);
-        const current_brightness: u8 = try std.fmt.parseInt(u8, buffer, 10);
+        const buffer = try allocator.alloc(u8, file_size + 1);
+        var reader = existing_file.reader(buffer);
+        const line = try reader.interface.takeDelimiterExclusive('\n');
+        const current_brightness: u8 = try std.fmt.parseInt(u8, line, 10);
 
         return current_brightness;
     } else |err| {
         if (err == error.FileNotFound) {
-            const new_file = try std.fs.cwd().createFile(file_name, .{ .read = false });
+            const new_file = try std.fs.cwd().createFile(file_path, .{ .read = false });
             defer new_file.close();
 
             const get_luminance: [5]u8 = .{ 0x51, 0x82, 0x01, 0x10, (0x51 ^ 0x82 ^ 0x01 ^ 0x10) };
@@ -60,13 +61,24 @@ fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness:
         file_name = "dev-i2c-4.txt";
     }
 
-    const current_brightness: u8 = try get(i2c, file_name);
-    var potential_brightness: i16 = 0;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const gpa_allocator = gpa.allocator();
+
+    const exe_dir = try std.fs.selfExeDirPathAlloc(gpa_allocator);
+    defer gpa_allocator.free(exe_dir);
+
+    var paths: [2][]const u8 = .{ exe_dir, file_name };
+    const file_path = try std.fs.path.join(gpa_allocator, &paths);
+    defer gpa_allocator.free(file_path);
+
+    const current_brightness: u8 = try get(i2c, file_path);
+    var potential_brightness: i64 = 0;
 
     if (!get_only) {
         if (increase) {
             potential_brightness = current_brightness + brightness;
-            if (potential_brightness > 255) {
+            if (potential_brightness > 100) {
                 new_brightness = 100;
             } else {
                 new_brightness = current_brightness + brightness;
@@ -86,14 +98,17 @@ fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness:
     } else {
         new_brightness = current_brightness;
         if (i == 0) {
-            const outb = std.io.getStdOut().writer();
-            try outb.print("{{\"brightness\": {d}}}\n", .{new_brightness});
+            var stdout_buffer: [3]u8 = undefined;
+            var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+            const stdout = &stdout_writer.interface;
+            try stdout.print("{{\"brightness\": {d}}}\n", .{new_brightness});
+            try stdout.flush();
         }
     }
 
     try std.posix.flock(i2c, std.posix.LOCK.UN);
 
-    const brightness_file = try std.fs.cwd().createFile(file_name, .{ .read = false });
+    const brightness_file = try std.fs.cwd().createFile(file_path, .{ .read = false });
     defer brightness_file.close();
     var buffer: [3]u8 = undefined;
     const brightness_string = try std.fmt.bufPrint(&buffer, "{}", .{new_brightness});
