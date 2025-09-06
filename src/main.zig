@@ -3,7 +3,7 @@ const li2c = @cImport({
     @cInclude("linux/i2c-dev.h");
 });
 
-fn get(i2c: i32, file_path: []const u8) !u8 {
+fn get(i2c: i32, dir_path: []const u8, file_path: []const u8) !u8 {
     if (std.fs.cwd().openFile(file_path, .{ .mode = .read_only })) |existing_file| {
         defer existing_file.close();
 
@@ -16,10 +16,17 @@ fn get(i2c: i32, file_path: []const u8) !u8 {
         const current_brightness: u8 = try std.fmt.parseInt(u8, line, 10);
 
         return current_brightness;
-    } else |err| {
-        if (err == error.FileNotFound) {
-            const new_file = try std.fs.cwd().createFile(file_path, .{ .read = false });
-            defer new_file.close();
+    } else |open_err| {
+        if (open_err == error.FileNotFound) {
+            if (std.fs.cwd().createFile(file_path, .{ .read = false })) |new_file| {
+                defer new_file.close();
+            } else |create_err| {
+                if (create_err == error.FileNotFound) {
+                    try std.fs.cwd().makeDir(dir_path);
+                    const new_file = try std.fs.cwd().createFile(file_path, .{ .read = false });
+                    defer new_file.close();
+                }
+            }
 
             const get_luminance: [5]u8 = .{ 0x51, 0x82, 0x01, 0x10, (0x51 ^ 0x82 ^ 0x01 ^ 0x10) };
             _ = try std.posix.write(i2c, &get_luminance);
@@ -64,14 +71,12 @@ fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness:
     defer _ = gpa.deinit();
     const gpa_allocator = gpa.allocator();
 
-    const exe_dir = try std.fs.selfExeDirPathAlloc(gpa_allocator);
-    defer gpa_allocator.free(exe_dir);
-
-    var paths: [2][]const u8 = .{ exe_dir, file_name };
+    const dir_path: []const u8 = "/home/kiran/.config/ddc";
+    var paths: [2][]const u8 = .{ dir_path, file_name };
     const file_path = try std.fs.path.join(gpa_allocator, &paths);
     defer gpa_allocator.free(file_path);
 
-    const current_brightness: u8 = try get(i2c, file_path);
+    const current_brightness: u8 = try get(i2c, dir_path, file_path);
     var test_brightness: struct { u8, u1 } = .{ undefined, undefined };
     var new_brightness: u8 = 0;
 
