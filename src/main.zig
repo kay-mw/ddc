@@ -24,7 +24,7 @@ fn get(i2c: i32, file_path: []const u8) !u8 {
             const get_luminance: [5]u8 = .{ 0x51, 0x82, 0x01, 0x10, (0x51 ^ 0x82 ^ 0x01 ^ 0x10) };
             _ = try std.posix.write(i2c, &get_luminance);
 
-            std.Thread.sleep(10 * std.time.ns_per_us);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
 
             // To understand magic numbers, see Page 19 of https://glenwing.github.io/docs/VESA-DDCCI-1.1.pdf
             var luminance_reply: [15]u8 = undefined;
@@ -42,13 +42,12 @@ fn set(i2c: i32, new_brightness: u8) !void {
     const set_luminance: [7]u8 = .{ 0x51, 0x84, 0x03, 0x10, 0x00, new_brightness, (0x51 ^ 0x84 ^ 0x03 ^ 0x10 ^ 0x00 ^ new_brightness) };
     _ = try std.posix.write(i2c, &set_luminance);
 
-    std.Thread.sleep(5 * std.time.ns_per_us);
+    std.Thread.sleep(5 * std.time.ns_per_ms);
 }
 
 fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness: u8, i: u8) !void {
     const addr: u8 = 0x37;
 
-    var new_brightness: u8 = 0;
     var file_name: []const u8 = undefined;
 
     const i2c: i32 = try std.posix.open(monitor, .{ .ACCMODE = .RDWR }, 0);
@@ -73,19 +72,23 @@ fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness:
     defer gpa_allocator.free(file_path);
 
     const current_brightness: u8 = try get(i2c, file_path);
-    var potential_brightness: i64 = 0;
+    var test_brightness: struct { u8, u1 } = .{ undefined, undefined };
+    var new_brightness: u8 = 0;
 
     if (!get_only) {
         if (increase) {
-            potential_brightness = current_brightness + brightness;
-            if (potential_brightness > 100) {
+            test_brightness = @addWithOverflow(current_brightness, brightness);
+            if (test_brightness[1] == 1) {
                 new_brightness = 100;
             } else {
                 new_brightness = current_brightness + brightness;
+                if (new_brightness > 100) {
+                    new_brightness = 100;
+                }
             }
         } else {
-            potential_brightness = current_brightness - brightness;
-            if (potential_brightness < 0) {
+            test_brightness = @subWithOverflow(current_brightness, brightness);
+            if (test_brightness[1] == 1) {
                 new_brightness = 0;
             } else {
                 new_brightness = current_brightness - brightness;
@@ -134,16 +137,36 @@ pub fn main() !void {
             flag = true;
         } else if (std.mem.eql(u8, arg, "-g") == true) {
             get_only = true;
+            flag = true;
         } else if (!args.skip() and !get_only) {
-            brightness = try std.fmt.parseInt(u8, arg, 10);
-            if (brightness > 100 or brightness < 0) {
-                std.debug.print("Invalid brightness value {d}. Please provide a brightness value between 0 and 100\n", .{brightness});
+            if (std.fmt.parseInt(u8, arg, 10)) |number| {
+                brightness = number;
+            } else |err| switch (err) {
+                error.Overflow => {
+                    if (increase) {
+                        brightness = 100;
+                    } else {
+                        brightness = 0;
+                    }
+                },
+                error.InvalidCharacter => {
+                    std.log.err("Invalid brightness value {any}. Please provide a numeric brightness value between 0 and 100", .{brightness});
+                    return;
+                },
+            }
+            if (brightness > 100) {
+                std.log.err("Invalid brightness value {d}. Please provide a brightness value between 0 and 100", .{brightness});
                 return;
             }
         } else {
-            std.debug.print("Invalid argument. Valid uses are: ddc -i <brightness>, ddc -d <brightness>, ddc -g\n", .{});
+            std.log.err("Invalid argument. Valid uses are: ddc -i <brightness>, ddc -d <brightness>, ddc -g", .{});
             return;
         }
+    }
+
+    if (!flag) {
+        std.log.err("No flag was given. Please pass at least one flag. Valid uses are: ddc -i <brightness>, ddc -d <brightness>, ddc -g", .{});
+        return;
     }
 
     const monitors: [2][]const u8 = .{ "/dev/i2c-3", "/dev/i2c-4" };
