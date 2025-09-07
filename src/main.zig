@@ -71,56 +71,69 @@ fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness:
     defer _ = gpa.deinit();
     const gpa_allocator = gpa.allocator();
 
-    const dir_path: []const u8 = "/home/kiran/.config/ddc";
-    var paths: [2][]const u8 = .{ dir_path, file_name };
-    const file_path = try std.fs.path.join(gpa_allocator, &paths);
-    defer gpa_allocator.free(file_path);
+    const user_var = "USER";
+    const user = std.posix.getenv(user_var);
+    if (user) |name| {
+        var dir_paths: [3][]const u8 = .{
+            "/home",
+            name,
+            ".config/ddc",
+        };
+        const dir_path = try std.fs.path.join(gpa_allocator, &dir_paths);
+        defer gpa_allocator.free(dir_path);
 
-    const current_brightness: u8 = try get(i2c, dir_path, file_path);
-    var test_brightness: struct { u8, u1 } = .{ undefined, undefined };
-    var new_brightness: u8 = 0;
+        var file_paths: [4][]const u8 = .{ "/home", name, ".config/ddc", file_name };
+        const file_path = try std.fs.path.join(gpa_allocator, &file_paths);
+        defer gpa_allocator.free(file_path);
 
-    if (!get_only) {
-        if (increase) {
-            test_brightness = @addWithOverflow(current_brightness, brightness);
-            if (test_brightness[1] == 1) {
-                new_brightness = 100;
-            } else {
-                new_brightness = current_brightness + brightness;
-                if (new_brightness > 100) {
+        const current_brightness: u8 = try get(i2c, dir_path, file_path);
+        var test_brightness: struct { u8, u1 } = .{ undefined, undefined };
+        var new_brightness: u8 = 0;
+
+        if (!get_only) {
+            if (increase) {
+                test_brightness = @addWithOverflow(current_brightness, brightness);
+                if (test_brightness[1] == 1) {
                     new_brightness = 100;
+                } else {
+                    new_brightness = test_brightness[0];
+                    if (new_brightness > 100) {
+                        new_brightness = 100;
+                    }
+                }
+            } else {
+                test_brightness = @subWithOverflow(current_brightness, brightness);
+                if (test_brightness[1] == 1) {
+                    new_brightness = 0;
+                } else {
+                    new_brightness = test_brightness[0];
                 }
             }
+
+            if (new_brightness != current_brightness) {
+                try set(i2c, new_brightness);
+            }
         } else {
-            test_brightness = @subWithOverflow(current_brightness, brightness);
-            if (test_brightness[1] == 1) {
-                new_brightness = 0;
-            } else {
-                new_brightness = current_brightness - brightness;
+            new_brightness = current_brightness;
+            if (i == 0) {
+                var stdout_buffer: [3]u8 = undefined;
+                var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+                const stdout = &stdout_writer.interface;
+                try stdout.print("{{\"brightness\": {d}}}\n", .{new_brightness});
+                try stdout.flush();
             }
         }
 
-        if (new_brightness != current_brightness) {
-            try set(i2c, new_brightness);
-        }
+        try std.posix.flock(i2c, std.posix.LOCK.UN);
+
+        const brightness_file = try std.fs.cwd().createFile(file_path, .{ .read = false });
+        defer brightness_file.close();
+        var buffer: [3]u8 = undefined;
+        const brightness_string = try std.fmt.bufPrint(&buffer, "{}", .{new_brightness});
+        try brightness_file.writeAll(brightness_string);
     } else {
-        new_brightness = current_brightness;
-        if (i == 0) {
-            var stdout_buffer: [3]u8 = undefined;
-            var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-            const stdout = &stdout_writer.interface;
-            try stdout.print("{{\"brightness\": {d}}}\n", .{new_brightness});
-            try stdout.flush();
-        }
+        return;
     }
-
-    try std.posix.flock(i2c, std.posix.LOCK.UN);
-
-    const brightness_file = try std.fs.cwd().createFile(file_path, .{ .read = false });
-    defer brightness_file.close();
-    var buffer: [3]u8 = undefined;
-    const brightness_string = try std.fmt.bufPrint(&buffer, "{}", .{new_brightness});
-    try brightness_file.writeAll(brightness_string);
 }
 
 pub fn main() !void {
