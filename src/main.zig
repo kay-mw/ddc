@@ -97,11 +97,9 @@ fn get_timestamp_string(allocator: std.mem.Allocator) ![]u8 {
     return timestamp_string;
 }
 
-fn get(i2c: i32, dir_path: []const u8, file_path: []const u8) !u8 {
+fn get(allocator: std.mem.Allocator, i2c: i32, dir_path: []const u8, file_path: []const u8) !u8 {
     if (std.fs.cwd().openFile(file_path, .{ .mode = .read_only })) |existing_file| {
         defer existing_file.close();
-
-        const allocator = std.heap.page_allocator;
 
         const file_size = (try existing_file.stat()).size;
         const buffer = try allocator.alloc(u8, file_size + 1);
@@ -146,7 +144,7 @@ fn set(i2c: i32, new_brightness: u8) !void {
     std.Thread.sleep(5 * std.time.ns_per_ms);
 }
 
-fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness: u8, i: u8) !void {
+fn run_protocol(allocator: std.mem.Allocator, monitor: []const u8, get_only: bool, increase: bool, brightness: u8, i: u8) !void {
     const addr: u8 = 0x37;
 
     var file_name: []const u8 = undefined;
@@ -177,10 +175,6 @@ fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness:
         file_name = "dev-i2c-4.txt";
     }
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const gpa_allocator = gpa.allocator();
-
     const user_var = "USER";
     const user = std.posix.getenv(user_var);
     if (user) |name| {
@@ -189,14 +183,12 @@ fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness:
             name,
             ".config/ddc",
         };
-        const dir_path = try std.fs.path.join(gpa_allocator, &dir_paths);
-        defer gpa_allocator.free(dir_path);
+        const dir_path = try std.fs.path.join(allocator, &dir_paths);
 
         var file_paths: [4][]const u8 = .{ "/home", name, ".config/ddc", file_name };
-        const file_path = try std.fs.path.join(gpa_allocator, &file_paths);
-        defer gpa_allocator.free(file_path);
+        const file_path = try std.fs.path.join(allocator, &file_paths);
 
-        const current_brightness: u8 = try get(i2c, dir_path, file_path);
+        const current_brightness: u8 = try get(allocator, i2c, dir_path, file_path);
         var test_brightness: struct { u8, u1 } = .{ undefined, undefined };
         var new_brightness: u8 = 0;
 
@@ -247,13 +239,14 @@ fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness:
 }
 
 fn run_protocol_logged(
+    allocator: std.mem.Allocator,
     monitor: []const u8,
     get_only: bool,
     increase: bool,
     brightness: u8,
     i: u8,
 ) void {
-    run_protocol(monitor, get_only, increase, brightness, i) catch |err| {
+    run_protocol(allocator, monitor, get_only, increase, brightness, i) catch |err| {
         std.log.err("run_protocol failed for monitor {s} with get_only `{}`, increase `{}` and brightness `{d}`: {}", .{
             monitor,
             get_only,
@@ -315,12 +308,17 @@ pub fn main() !void {
         return;
     }
 
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
     const monitors: [2][]const u8 = .{ "/dev/i2c-3", "/dev/i2c-4" };
     var handles: [2]std.Thread = undefined;
 
     i = 0;
     for (monitors) |monitor| {
-        handles[i] = std.Thread.spawn(.{}, run_protocol_logged, .{ monitor, get_only, increase, brightness, i }) catch |err| {
+        handles[i] = std.Thread.spawn(.{}, run_protocol_logged, .{ allocator, monitor, get_only, increase, brightness, i }) catch |err| {
             std.log.err("Failed to spawn thread for monitor {s}: {}", .{ monitor, err });
             return;
         };
