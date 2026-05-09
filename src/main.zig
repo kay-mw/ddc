@@ -2,6 +2,100 @@ const std = @import("std");
 const li2c = @cImport({
     @cInclude("linux/i2c-dev.h");
 });
+pub const std_options: std.Options = .{
+    .logFn = log,
+};
+
+pub fn log(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const home = std.posix.getenv("HOME") orelse {
+        std.debug.print("Failed to read $HOME.\n", .{});
+        return;
+    };
+
+    const allocator = std.heap.page_allocator;
+    const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, ".local/state/ddc" }) catch |err| {
+        std.debug.print("Failed to create dir path: {}\n", .{err});
+        return;
+    };
+    defer allocator.free(dir_path);
+    const file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, ".local/state/ddc/ddc.log" }) catch |err| {
+        std.debug.print("Failed to create file path: {}\n", .{err});
+        return;
+    };
+    defer allocator.free(file_path);
+
+    std.fs.makeDirAbsolute(dir_path) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => {
+            std.debug.print("Failed to create dir: {}\n", .{err});
+            return;
+        },
+    };
+    const created_file = std.fs.createFileAbsolute(file_path, .{ .truncate = false }) catch |err| {
+        std.debug.print("Failed to create log file: {}\n", .{err});
+        return;
+    };
+    created_file.close();
+
+    const file = std.fs.openFileAbsolute(file_path, .{ .mode = .read_write }) catch |err| {
+        std.debug.print("Failed to open log file: {}\n", .{err});
+        return;
+    };
+    defer file.close();
+
+    const stat = file.stat() catch |err| {
+        std.debug.print("Failed to get stat of log file: {}\n", .{err});
+        return;
+    };
+    file.seekTo(stat.size) catch |err| {
+        std.debug.print("Failed to seek log file: {}\n", .{err});
+        return;
+    };
+
+    const level_txt = comptime level.asText();
+    const scope_txt = @tagName(scope);
+    const timestamp_string = get_timestamp_string(allocator) catch |err| {
+        std.debug.print("Failed to get timestamp string: {}\n", .{err});
+        return;
+    };
+    defer allocator.free(timestamp_string);
+
+    const message = std.fmt.allocPrint(allocator, "[{s}] [{s}]({s}) " ++ format ++ "\n", .{ timestamp_string, level_txt, scope_txt } ++ args) catch |err| {
+        std.debug.print("Failed to create log message: {}\n", .{err});
+        return;
+    };
+    defer allocator.free(message);
+
+    file.writeAll(message) catch |err| {
+        std.debug.print("Failed to write to log file: {}\n", .{err});
+    };
+}
+
+fn get_timestamp_string(allocator: std.mem.Allocator) ![]u8 {
+    const now: u64 = @intCast(std.time.timestamp());
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = now };
+    const epoch_day = epoch_seconds.getEpochDay();
+
+    const year_day = epoch_day.calculateYearDay();
+    const year = year_day.year;
+    const month_day = year_day.calculateMonthDay();
+    const month = month_day.month.numeric();
+    const day = month_day.day_index + 1;
+
+    const day_seconds = epoch_seconds.getDaySeconds();
+    const hour = day_seconds.getHoursIntoDay();
+    const minute = day_seconds.getMinutesIntoHour();
+    const second = day_seconds.getSecondsIntoMinute();
+
+    const timestamp_string = try std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} UTC", .{ year, month, day, hour, minute, second });
+
+    return timestamp_string;
+}
 
 fn get(i2c: i32, dir_path: []const u8, file_path: []const u8) !u8 {
     if (std.fs.cwd().openFile(file_path, .{ .mode = .read_only })) |existing_file| {
@@ -58,8 +152,24 @@ fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness:
     var file_name: []const u8 = undefined;
 
     const i2c: i32 = try std.posix.open(monitor, .{ .ACCMODE = .RDWR }, 0);
+    defer std.posix.close(i2c);
     try std.posix.flock(i2c, std.posix.LOCK.EX);
-    _ = std.os.linux.ioctl(i2c, li2c.I2C_SLAVE, addr);
+    const ioctl_result = std.os.linux.ioctl(i2c, li2c.I2C_SLAVE, addr);
+
+    switch (std.os.linux.E.init(ioctl_result)) {
+        .SUCCESS => {},
+        .BADF => return error.InvalidFileDescriptor,
+        .FAULT => return error.InaccessibleMemoryArea,
+        .INVAL => return error.InvalidOpOrArgp,
+        .NOTTY => return error.InvalidDevice,
+        else => |errno| {
+            std.log.err("I2C_SLAVE ioctl failed for {s}: errno {s}", .{
+                monitor,
+                @tagName(errno),
+            });
+            return error.IoctlFailed;
+        },
+    }
 
     if (i == 0) {
         file_name = "dev-i2c-3.txt";
@@ -136,6 +246,24 @@ fn run_protocol(monitor: []const u8, get_only: bool, increase: bool, brightness:
     }
 }
 
+fn run_protocol_logged(
+    monitor: []const u8,
+    get_only: bool,
+    increase: bool,
+    brightness: u8,
+    i: u8,
+) void {
+    run_protocol(monitor, get_only, increase, brightness, i) catch |err| {
+        std.log.err("run_protocol failed for monitor {s} with get_only `{}`, increase `{}` and brightness `{d}`: {}", .{
+            monitor,
+            get_only,
+            increase,
+            brightness,
+            err,
+        });
+    };
+}
+
 pub fn main() !void {
     var args = std.process.args();
     var i: u8 = 0;
@@ -168,22 +296,22 @@ pub fn main() !void {
                     }
                 },
                 error.InvalidCharacter => {
-                    std.log.err("Invalid brightness value {any}. Please provide a numeric brightness value between 0 and 100", .{brightness});
+                    std.debug.print("Invalid brightness value {any}. Please provide a numeric brightness value between 0 and 100", .{brightness});
                     return;
                 },
             }
             if (brightness > 100) {
-                std.log.err("Invalid brightness value {d}. Please provide a brightness value between 0 and 100", .{brightness});
+                std.debug.print("Invalid brightness value {d}. Please provide a brightness value between 0 and 100", .{brightness});
                 return;
             }
         } else {
-            std.log.err("Invalid argument. Valid uses are: ddc -i <brightness>, ddc -d <brightness>, ddc -g", .{});
+            std.debug.print("Invalid argument. Valid uses are: ddc -i <brightness>, ddc -d <brightness>, ddc -g", .{});
             return;
         }
     }
 
     if (!flag) {
-        std.log.err("No flag was given. Please pass at least one flag. Valid uses are: ddc -i <brightness>, ddc -d <brightness>, ddc -g", .{});
+        std.debug.print("No flag was given. Please pass at least one flag. Valid uses are: ddc -i <brightness>, ddc -d <brightness>, ddc -g", .{});
         return;
     }
 
@@ -192,7 +320,10 @@ pub fn main() !void {
 
     i = 0;
     for (monitors) |monitor| {
-        handles[i] = try std.Thread.spawn(.{}, run_protocol, .{ monitor, get_only, increase, brightness, i });
+        handles[i] = std.Thread.spawn(.{}, run_protocol_logged, .{ monitor, get_only, increase, brightness, i }) catch |err| {
+            std.log.err("Failed to spawn thread for monitor {s}: {}", .{ monitor, err });
+            return;
+        };
         i += 1;
     }
 
