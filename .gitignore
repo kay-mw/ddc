@@ -2,7 +2,7 @@
 
 !.gitignore
 !build.zig
-!shell.nix
+!flake.nix
 !.envrc
 
 !src/
