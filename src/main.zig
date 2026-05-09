@@ -175,17 +175,15 @@ fn run_protocol(allocator: std.mem.Allocator, monitor: []const u8, get_only: boo
         file_name = "dev-i2c-4.txt";
     }
 
-    const user_var = "USER";
-    const user = std.posix.getenv(user_var);
-    if (user) |name| {
-        var dir_paths: [3][]const u8 = .{
-            "/home",
-            name,
-            ".config/ddc",
+    const home_env = std.posix.getenv("HOME");
+    if (home_env) |home| {
+        var dir_paths: [2][]const u8 = .{
+            home,
+            ".local/state/ddc",
         };
         const dir_path = try std.fs.path.join(allocator, &dir_paths);
 
-        var file_paths: [4][]const u8 = .{ "/home", name, ".config/ddc", file_name };
+        var file_paths: [2][]const u8 = .{ dir_path, file_name };
         const file_path = try std.fs.path.join(allocator, &file_paths);
 
         const current_brightness: u8 = try get(allocator, i2c, dir_path, file_path);
