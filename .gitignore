@@ -8,3 +8,4 @@
 !src/
 !src/main.c
 !src/main.zig
+!src/c.h

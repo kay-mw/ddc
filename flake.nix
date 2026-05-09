@@ -2,7 +2,7 @@
   description = "ddc";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/6308c3b21396534d8aaeac46179c14c439a89b8a";
+    nixpkgs.url = "github:NixOS/nixpkgs/68a8af93ff4297686cb68880845e61e5e2e41d92";
   };
 
   outputs =
@@ -17,7 +17,7 @@
         in
         pkgs.mkShell {
           packages = with pkgs; [
-            zig_0_15
+            zig_0_16
           ];
           shellHook = ''
             export ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-cache/global"

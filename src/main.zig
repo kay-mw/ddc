@@ -1,7 +1,7 @@
 const std = @import("std");
-const li2c = @cImport({
-    @cInclude("linux/i2c-dev.h");
-});
+const li2c = @import("li2c");
+var global_home: ?[]const u8 = null;
+
 pub const std_options: std.Options = .{
     .logFn = log,
 };
@@ -12,72 +12,76 @@ pub fn log(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    const home = std.posix.getenv("HOME") orelse {
-        std.debug.print("Failed to read $HOME.\n", .{});
+    const io = std.Options.debug_io;
+
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const home = global_home orelse {
+        std.debug.print("Failed to get $HOME.", .{});
         return;
     };
 
-    const allocator = std.heap.page_allocator;
     const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, ".local/state/ddc" }) catch |err| {
         std.debug.print("Failed to create dir path: {}\n", .{err});
         return;
     };
-    defer allocator.free(dir_path);
     const file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, ".local/state/ddc/ddc.log" }) catch |err| {
         std.debug.print("Failed to create file path: {}\n", .{err});
         return;
     };
-    defer allocator.free(file_path);
 
-    std.fs.makeDirAbsolute(dir_path) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(io, dir_path, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => {
             std.debug.print("Failed to create dir: {}\n", .{err});
             return;
         },
     };
-    const created_file = std.fs.createFileAbsolute(file_path, .{ .truncate = false }) catch |err| {
+    const file = std.Io.Dir.createFileAbsolute(io, file_path, .{ .truncate = false }) catch |err| {
         std.debug.print("Failed to create log file: {}\n", .{err});
         return;
     };
-    created_file.close();
+    defer file.close(io);
 
-    const file = std.fs.openFileAbsolute(file_path, .{ .mode = .read_write }) catch |err| {
-        std.debug.print("Failed to open log file: {}\n", .{err});
-        return;
-    };
-    defer file.close();
-
-    const stat = file.stat() catch |err| {
+    const stat = file.stat(io) catch |err| {
         std.debug.print("Failed to get stat of log file: {}\n", .{err});
         return;
     };
-    file.seekTo(stat.size) catch |err| {
+
+    var write_buffer: [0]u8 = undefined;
+    var writer = file.writer(io, &write_buffer);
+    writer.seekTo(stat.size) catch |err| {
         std.debug.print("Failed to seek log file: {}\n", .{err});
         return;
     };
 
     const level_txt = comptime level.asText();
     const scope_txt = @tagName(scope);
-    const timestamp_string = get_timestamp_string(allocator) catch |err| {
-        std.debug.print("Failed to get timestamp string: {}\n", .{err});
+
+    const timestamp_string = construct_timestamp_string(io, allocator) catch |err| {
+        std.debug.print("Failed to construct timestamp string: {}\n", .{err});
         return;
     };
-    defer allocator.free(timestamp_string);
-
     const message = std.fmt.allocPrint(allocator, "[{s}] [{s}]({s}) " ++ format ++ "\n", .{ timestamp_string, level_txt, scope_txt } ++ args) catch |err| {
         std.debug.print("Failed to create log message: {}\n", .{err});
         return;
     };
-    defer allocator.free(message);
 
-    file.writeAll(message) catch |err| {
+    writer.interface.writeAll(message) catch |err| {
         std.debug.print("Failed to write to log file: {}\n", .{err});
+        return;
+    };
+    writer.flush() catch |err| {
+        std.debug.print("Failed to flush the log file: {}\n", .{err});
+        return;
     };
 }
 
-fn get_timestamp_string(allocator: std.mem.Allocator) ![]u8 {
-    const now: u64 = @intCast(std.time.timestamp());
+fn construct_timestamp_string(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
+    const ts = std.Io.Timestamp.now(io, .real);
+    const now: u64 = @intCast(ts.toSeconds());
     const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = now };
     const epoch_day = epoch_seconds.getEpochDay();
 
@@ -97,37 +101,38 @@ fn get_timestamp_string(allocator: std.mem.Allocator) ![]u8 {
     return timestamp_string;
 }
 
-fn get(allocator: std.mem.Allocator, i2c: i32, dir_path: []const u8, file_path: []const u8) !u8 {
-    if (std.fs.cwd().openFile(file_path, .{ .mode = .read_only })) |existing_file| {
-        defer existing_file.close();
+fn get(io: std.Io, allocator: std.mem.Allocator, i2c_file: std.Io.File, dir_path: []const u8, file_path: []const u8) !u8 {
+    if (std.Io.Dir.cwd().openFile(io, file_path, .{ .mode = .read_only })) |existing_file| {
+        defer existing_file.close(io);
 
-        const file_size = (try existing_file.stat()).size;
+        const file_size = (try existing_file.stat(io)).size;
         const buffer = try allocator.alloc(u8, file_size + 1);
-        var reader = existing_file.reader(buffer);
+        var reader = existing_file.reader(io, buffer);
         const line = try reader.interface.takeDelimiterExclusive('\n');
         const current_brightness: u8 = try std.fmt.parseInt(u8, line, 10);
 
         return current_brightness;
     } else |open_err| {
         if (open_err == error.FileNotFound) {
-            if (std.fs.cwd().createFile(file_path, .{ .read = false })) |new_file| {
-                defer new_file.close();
+            if (std.Io.Dir.cwd().createFile(io, file_path, .{ .read = false })) |new_file| {
+                defer new_file.close(io);
             } else |create_err| {
                 if (create_err == error.FileNotFound) {
-                    try std.fs.cwd().makeDir(dir_path);
-                    const new_file = try std.fs.cwd().createFile(file_path, .{ .read = false });
-                    defer new_file.close();
+                    try std.Io.Dir.cwd().createDir(io, dir_path, .default_dir);
+                    const new_file = try std.Io.Dir.cwd().createFile(io, file_path, .{ .read = false });
+                    defer new_file.close(io);
                 }
             }
 
             const get_luminance: [5]u8 = .{ 0x51, 0x82, 0x01, 0x10, (0x51 ^ 0x82 ^ 0x01 ^ 0x10) };
-            _ = try std.posix.write(i2c, &get_luminance);
+            try i2c_file.writeStreamingAll(io, &get_luminance);
 
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            try std.Io.sleep(io, .fromMilliseconds(10), .awake);
 
             // To understand magic numbers, see Page 19 of https://glenwing.github.io/docs/VESA-DDCCI-1.1.pdf
             var luminance_reply: [15]u8 = undefined;
-            _ = try std.posix.read(i2c, &luminance_reply);
+            const n = try i2c_file.readStreaming(io, &.{luminance_reply[0..]});
+            if (n < 10) return error.ShortI2cRead;
             const current_brightness: u8 = luminance_reply[9];
 
             return current_brightness;
@@ -137,24 +142,27 @@ fn get(allocator: std.mem.Allocator, i2c: i32, dir_path: []const u8, file_path: 
     return error.FailedToGetBrightness;
 }
 
-fn set(i2c: i32, new_brightness: u8) !void {
+fn set(io: std.Io, i2c_file: std.Io.File, new_brightness: u8) !void {
     const set_luminance: [7]u8 = .{ 0x51, 0x84, 0x03, 0x10, 0x00, new_brightness, (0x51 ^ 0x84 ^ 0x03 ^ 0x10 ^ 0x00 ^ new_brightness) };
-    _ = try std.posix.write(i2c, &set_luminance);
+    _ = try i2c_file.writeStreamingAll(io, &set_luminance);
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    try std.Io.sleep(io, .fromMilliseconds(5), .awake);
 }
 
-fn run_protocol(allocator: std.mem.Allocator, monitor: []const u8, get_only: bool, increase: bool, brightness: u8, i: u8) !void {
+fn run_protocol(io: std.Io, allocator: std.mem.Allocator, monitor: []const u8, get_only: bool, increase: bool, brightness: u8, i: u8) !void {
     const addr: u8 = 0x37;
 
     var file_name: []const u8 = undefined;
 
-    const i2c: i32 = try std.posix.open(monitor, .{ .ACCMODE = .RDWR }, 0);
-    defer std.posix.close(i2c);
-    try std.posix.flock(i2c, std.posix.LOCK.EX);
-    const ioctl_result = std.os.linux.ioctl(i2c, li2c.I2C_SLAVE, addr);
+    const i2c_file = try std.Io.Dir.openFileAbsolute(io, monitor, .{ .mode = .read_write, .allow_directory = false });
+    defer i2c_file.close(io);
+    try i2c_file.lock(io, .exclusive);
+    defer i2c_file.unlock(io);
 
-    switch (std.os.linux.E.init(ioctl_result)) {
+    const i2c: i32 = i2c_file.handle;
+
+    const ioctl_result = std.os.linux.ioctl(i2c, li2c.I2C_SLAVE, addr);
+    switch (std.os.linux.errno(ioctl_result)) {
         .SUCCESS => {},
         .BADF => return error.InvalidFileDescriptor,
         .FAULT => return error.InaccessibleMemoryArea,
@@ -175,68 +183,71 @@ fn run_protocol(allocator: std.mem.Allocator, monitor: []const u8, get_only: boo
         file_name = "dev-i2c-4.txt";
     }
 
-    const home_env = std.posix.getenv("HOME");
-    if (home_env) |home| {
-        var dir_paths: [2][]const u8 = .{
-            home,
-            ".local/state/ddc",
-        };
-        const dir_path = try std.fs.path.join(allocator, &dir_paths);
+    const home = global_home orelse {
+        std.debug.print("Failed to get $HOME.", .{});
+        return;
+    };
+    var dir_paths: [2][]const u8 = .{
+        home,
+        ".local/state/ddc",
+    };
+    const dir_path = try std.fs.path.join(allocator, &dir_paths);
 
-        var file_paths: [2][]const u8 = .{ dir_path, file_name };
-        const file_path = try std.fs.path.join(allocator, &file_paths);
+    var file_paths: [2][]const u8 = .{ dir_path, file_name };
+    const file_path = try std.fs.path.join(allocator, &file_paths);
 
-        const current_brightness: u8 = try get(allocator, i2c, dir_path, file_path);
-        var test_brightness: struct { u8, u1 } = .{ undefined, undefined };
-        var new_brightness: u8 = 0;
+    const current_brightness: u8 = try get(io, allocator, i2c_file, dir_path, file_path);
+    var test_brightness: struct { u8, u1 } = .{ undefined, undefined };
+    var new_brightness: u8 = 0;
 
-        if (!get_only) {
-            if (increase) {
-                test_brightness = @addWithOverflow(current_brightness, brightness);
-                if (test_brightness[1] == 1) {
-                    new_brightness = 100;
-                } else {
-                    new_brightness = test_brightness[0];
-                    if (new_brightness > 100) {
-                        new_brightness = 100;
-                    }
-                }
+    if (!get_only) {
+        if (increase) {
+            test_brightness = @addWithOverflow(current_brightness, brightness);
+            if (test_brightness[1] == 1) {
+                new_brightness = 100;
             } else {
-                test_brightness = @subWithOverflow(current_brightness, brightness);
-                if (test_brightness[1] == 1) {
-                    new_brightness = 0;
-                } else {
-                    new_brightness = test_brightness[0];
+                new_brightness = test_brightness[0];
+                if (new_brightness > 100) {
+                    new_brightness = 100;
                 }
-            }
-
-            if (new_brightness != current_brightness) {
-                try set(i2c, new_brightness);
             }
         } else {
-            new_brightness = current_brightness;
-            if (i == 0) {
-                var stdout_buffer: [3]u8 = undefined;
-                var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-                const stdout = &stdout_writer.interface;
-                try stdout.print("{{\"brightness\": {d}}}\n", .{new_brightness});
-                try stdout.flush();
+            test_brightness = @subWithOverflow(current_brightness, brightness);
+            if (test_brightness[1] == 1) {
+                new_brightness = 0;
+            } else {
+                new_brightness = test_brightness[0];
             }
         }
 
-        try std.posix.flock(i2c, std.posix.LOCK.UN);
-
-        const brightness_file = try std.fs.cwd().createFile(file_path, .{ .read = false });
-        defer brightness_file.close();
-        var buffer: [3]u8 = undefined;
-        const brightness_string = try std.fmt.bufPrint(&buffer, "{}", .{new_brightness});
-        try brightness_file.writeAll(brightness_string);
+        if (new_brightness != current_brightness) {
+            try set(io, i2c_file, new_brightness);
+        }
     } else {
-        return;
+        new_brightness = current_brightness;
+        if (i == 0) {
+            var stdout_buffer: [3]u8 = undefined;
+            var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+            const stdout = &stdout_writer.interface;
+            try stdout.print("{{\"brightness\": {d}}}\n", .{new_brightness});
+            try stdout.flush();
+        }
     }
+
+    const brightness_file = try std.Io.Dir.cwd().createFile(io, file_path, .{ .read = false });
+    defer brightness_file.close(io);
+    var write_buffer: [0]u8 = undefined;
+    var writer = brightness_file.writer(io, &write_buffer);
+
+    var buffer: [3]u8 = undefined;
+    const brightness_string = try std.fmt.bufPrint(&buffer, "{}", .{new_brightness});
+    try writer.interface.writeAll(brightness_string);
+
+    try writer.flush();
 }
 
 fn run_protocol_logged(
+    io: std.Io,
     allocator: std.mem.Allocator,
     monitor: []const u8,
     get_only: bool,
@@ -244,7 +255,7 @@ fn run_protocol_logged(
     brightness: u8,
     i: u8,
 ) void {
-    run_protocol(allocator, monitor, get_only, increase, brightness, i) catch |err| {
+    run_protocol(io, allocator, monitor, get_only, increase, brightness, i) catch |err| {
         std.log.err("run_protocol failed for monitor {s} with get_only `{}`, increase `{}` and brightness `{d}`: {}", .{
             monitor,
             get_only,
@@ -255,8 +266,10 @@ fn run_protocol_logged(
     };
 }
 
-pub fn main() !void {
-    var args = std.process.args();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    global_home = init.environ_map.get("HOME") orelse return error.MissingHome;
+    var args = init.minimal.args.iterate();
     var i: u8 = 0;
     var increase: bool = false;
     var flag: bool = false;
@@ -287,22 +300,22 @@ pub fn main() !void {
                     }
                 },
                 error.InvalidCharacter => {
-                    std.debug.print("Invalid brightness value {any}. Please provide a numeric brightness value between 0 and 100", .{brightness});
+                    std.debug.print("Invalid brightness value {any}. Please provide a numeric brightness value between 0 and 100\n", .{brightness});
                     return;
                 },
             }
             if (brightness > 100) {
-                std.debug.print("Invalid brightness value {d}. Please provide a brightness value between 0 and 100", .{brightness});
+                std.debug.print("Invalid brightness value {d}. Please provide a brightness value between 0 and 100\n", .{brightness});
                 return;
             }
         } else {
-            std.debug.print("Invalid argument. Valid uses are: ddc -i <brightness>, ddc -d <brightness>, ddc -g", .{});
+            std.debug.print("Invalid argument. Valid uses are: ddc -i <brightness>, ddc -d <brightness>, ddc -g\n", .{});
             return;
         }
     }
 
     if (!flag) {
-        std.debug.print("No flag was given. Please pass at least one flag. Valid uses are: ddc -i <brightness>, ddc -d <brightness>, ddc -g", .{});
+        std.debug.print("No flag was given. Please pass at least one flag. Valid uses are: ddc -i <brightness>, ddc -d <brightness>, ddc -g\n", .{});
         return;
     }
 
@@ -316,7 +329,7 @@ pub fn main() !void {
 
     i = 0;
     for (monitors) |monitor| {
-        handles[i] = std.Thread.spawn(.{}, run_protocol_logged, .{ allocator, monitor, get_only, increase, brightness, i }) catch |err| {
+        handles[i] = std.Thread.spawn(.{}, run_protocol_logged, .{ io, allocator, monitor, get_only, increase, brightness, i }) catch |err| {
             std.log.err("Failed to spawn thread for monitor {s}: {}", .{ monitor, err });
             return;
         };
