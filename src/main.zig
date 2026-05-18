@@ -6,6 +6,21 @@ pub const std_options: std.Options = .{
     .logFn = log,
 };
 
+fn open_log_writer(allocator: std.mem.Allocator, io: std.Io) !std.Io.File {
+    const home = global_home orelse return error.HomeError;
+
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, ".local/state/ddc" });
+    const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, ".local/state/ddc/ddc.log" });
+
+    std.Io.Dir.createDirAbsolute(io, dir_path, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    const file = try std.Io.Dir.createFileAbsolute(io, file_path, .{ .truncate = false });
+
+    return file;
+}
+
 pub fn log(
     comptime level: std.log.Level,
     comptime scope: @TypeOf(.enum_literal),
@@ -18,40 +33,25 @@ pub fn log(
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const home = global_home orelse {
-        std.debug.print("Failed to get $HOME.", .{});
-        return;
-    };
-
-    const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, ".local/state/ddc" }) catch |err| {
-        std.debug.print("Failed to create dir path: {}\n", .{err});
-        return;
-    };
-    const file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, ".local/state/ddc/ddc.log" }) catch |err| {
-        std.debug.print("Failed to create file path: {}\n", .{err});
-        return;
-    };
-
-    std.Io.Dir.createDirAbsolute(io, dir_path, .default_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => {
-            std.debug.print("Failed to create dir: {}\n", .{err});
-            return;
-        },
-    };
-    const file = std.Io.Dir.createFileAbsolute(io, file_path, .{ .truncate = false }) catch |err| {
-        std.debug.print("Failed to create log file: {}\n", .{err});
+    const file = open_log_writer(allocator, io) catch |err| {
+        std.debug.print("Failed to create log writer: {}\n", .{err});
         return;
     };
     defer file.close(io);
 
-    const stat = file.stat(io) catch |err| {
-        std.debug.print("Failed to get stat of log file: {}\n", .{err});
+    file.lock(io, .exclusive) catch |err| {
+        std.debug.print("Failed to lock the log file: {}\n", .{err});
         return;
     };
+    defer file.unlock(io);
 
     var write_buffer: [0]u8 = undefined;
     var writer = file.writer(io, &write_buffer);
+
+    const stat = file.stat(io) catch |err| {
+        std.debug.print("Failed to stat log file: {}\n", .{err});
+        return;
+    };
     writer.seekTo(stat.size) catch |err| {
         std.debug.print("Failed to seek log file: {}\n", .{err});
         return;
@@ -263,6 +263,41 @@ fn run_protocol_logged(
             brightness,
             err,
         });
+
+        if (@errorReturnTrace()) |trace| {
+            const file = open_log_writer(allocator, io) catch |open_err| {
+                std.log.err("Failed to create log writer: {}\n", .{open_err});
+                return;
+            };
+            defer file.close(io);
+
+            file.lock(io, .exclusive) catch |lock_err| {
+                std.debug.print("Failed to lock the log file: {}\n", .{lock_err});
+                return;
+            };
+            defer file.unlock(io);
+
+            const stat = file.stat(io) catch |stat_err| {
+                std.log.err("Failed to stat log file: {}\n", .{stat_err});
+                return;
+            };
+
+            var write_buffer: [0]u8 = undefined;
+            var writer = file.writer(io, &write_buffer);
+
+            writer.seekTo(stat.size) catch |seek_err| {
+                std.log.err("Failed to seek log file: {}\n", .{seek_err});
+                return;
+            };
+            std.debug.writeErrorReturnTrace(trace, .{ .writer = &writer.interface, .mode = .no_color }) catch |trace_err| {
+                std.log.err("Failed to write error return trace: {}\n", .{trace_err});
+                return;
+            };
+            writer.flush() catch |flush_err| {
+                std.log.err("Failed to flush the log file: {}\n", .{flush_err});
+                return;
+            };
+        }
     };
 }
 
