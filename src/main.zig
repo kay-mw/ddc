@@ -239,8 +239,8 @@ fn run_protocol(io: std.Io, allocator: std.mem.Allocator, monitor: []const u8, g
     var write_buffer: [0]u8 = undefined;
     var writer = brightness_file.writer(io, &write_buffer);
 
-    var buffer: [3]u8 = undefined;
-    const brightness_string = try std.fmt.bufPrint(&buffer, "{}", .{new_brightness});
+    var buffer: [4]u8 = undefined;
+    const brightness_string = try std.fmt.bufPrint(&buffer, "{}\n", .{new_brightness});
     try writer.interface.writeAll(brightness_string);
 
     try writer.flush();
