@@ -101,6 +101,21 @@ fn construct_timestamp_string(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
     return timestamp_string;
 }
 
+fn get_luminance(io: std.Io, i2c_file: std.Io.File) !u8 {
+    const bytes_to_send: [5]u8 = .{ 0x51, 0x82, 0x01, 0x10, (0x51 ^ 0x82 ^ 0x01 ^ 0x10) };
+    try i2c_file.writeStreamingAll(io, &bytes_to_send);
+
+    try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+
+    // To understand magic numbers, see Page 19 of https://glenwing.github.io/docs/VESA-DDCCI-1.1.pdf
+    var luminance_reply: [15]u8 = undefined;
+    const n = try i2c_file.readStreaming(io, &.{luminance_reply[0..]});
+    if (n < 10) return error.ShortI2cRead;
+    const current_brightness: u8 = luminance_reply[9];
+
+    return current_brightness;
+}
+
 fn get(io: std.Io, allocator: std.mem.Allocator, i2c_file: std.Io.File, dir_path: []const u8, file_path: []const u8) !u8 {
     if (std.Io.Dir.cwd().openFile(io, file_path, .{ .mode = .read_only })) |existing_file| {
         defer existing_file.close(io);
@@ -108,10 +123,17 @@ fn get(io: std.Io, allocator: std.mem.Allocator, i2c_file: std.Io.File, dir_path
         const file_size = (try existing_file.stat(io)).size;
         const buffer = try allocator.alloc(u8, file_size + 1);
         var reader = existing_file.reader(io, buffer);
-        const line = try reader.interface.takeDelimiterExclusive('\n');
-        const current_brightness: u8 = try std.fmt.parseInt(u8, line, 10);
 
-        return current_brightness;
+        if (reader.interface.takeDelimiterExclusive('\n')) |line| {
+            const current_brightness: u8 = try std.fmt.parseInt(u8, line, 10);
+            return current_brightness;
+        } else |read_err| switch (read_err) {
+            error.EndOfStream => {
+                const current_brightness = get_luminance(io, i2c_file);
+                return current_brightness;
+            },
+            else => return read_err,
+        }
     } else |open_err| {
         if (open_err == error.FileNotFound) {
             if (std.Io.Dir.cwd().createFile(io, file_path, .{ .read = false })) |new_file| {
@@ -124,16 +146,7 @@ fn get(io: std.Io, allocator: std.mem.Allocator, i2c_file: std.Io.File, dir_path
                 }
             }
 
-            const get_luminance: [5]u8 = .{ 0x51, 0x82, 0x01, 0x10, (0x51 ^ 0x82 ^ 0x01 ^ 0x10) };
-            try i2c_file.writeStreamingAll(io, &get_luminance);
-
-            try std.Io.sleep(io, .fromMilliseconds(10), .awake);
-
-            // To understand magic numbers, see Page 19 of https://glenwing.github.io/docs/VESA-DDCCI-1.1.pdf
-            var luminance_reply: [15]u8 = undefined;
-            const n = try i2c_file.readStreaming(io, &.{luminance_reply[0..]});
-            if (n < 10) return error.ShortI2cRead;
-            const current_brightness: u8 = luminance_reply[9];
+            const current_brightness = try get_luminance(io, i2c_file);
 
             return current_brightness;
         }
